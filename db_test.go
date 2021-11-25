@@ -532,12 +532,8 @@ func TestOpen_BigPage(t *testing.T) {
 	}
 }
 
-// TestOpen_RecoverFreeList tests opening the DB with free-list
-// write-out after no free list sync will recover the free list
-// and write it out.
-func TestOpen_RecoverFreeList(t *testing.T) {
-	db := MustOpenWithOption(&bolt.Options{NoFreelistSync: true})
-	defer db.MustClose()
+func generateFreepages(t *testing.T, db *DB) {
+	t.Helper()
 
 	// Write some pages.
 	tx, err := db.Begin(true)
@@ -545,7 +541,7 @@ func TestOpen_RecoverFreeList(t *testing.T) {
 		t.Fatal(err)
 	}
 	wbuf := make([]byte, 8192)
-	for i := 0; i < 100; i++ {
+	for i := 0; i < 20; i++ {
 		s := fmt.Sprintf("%d", i)
 		b, err := tx.CreateBucket([]byte(s))
 		if err != nil {
@@ -563,7 +559,7 @@ func TestOpen_RecoverFreeList(t *testing.T) {
 	if tx, err = db.Begin(true); err != nil {
 		t.Fatal(err)
 	}
-	for i := 0; i < 50; i++ {
+	for i := 0; i < 10; i++ {
 		s := fmt.Sprintf("%d", i)
 		b := tx.Bucket([]byte(s))
 		if b == nil {
@@ -579,24 +575,39 @@ func TestOpen_RecoverFreeList(t *testing.T) {
 	if err := db.DB.Close(); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func TestOpen_RecoverFreeListOrig(t *testing.T) {
+	db := MustOpenWithOption(&bolt.Options{NoFreelistSync: true})
+	//defer db.MustClose()
+	generateFreepages(t, db)
+	fp1 := db.Stats().FreePageN + db.Stats().PendingPageN
+	//fmt.Printf("%#v\n", db.Stats())
 
 	// Record freelist count from opening with NoFreelistSync.
 	db.MustReopen()
 	freepages := db.Stats().FreePageN
-	if freepages == 0 {
-		t.Fatalf("no free pages on NoFreelistSync reopen")
+	if freepages != fp1 {
+		t.Fatalf("expected freepages=%d, got: %d", fp1, freepages)
 	}
-	if err := db.DB.Close(); err != nil {
-		t.Fatal(err)
-	}
+}
 
-	// Check free page count is reconstructed when opened with freelist sync.
-	db.o = &bolt.Options{}
+// TestOpen_RecoverFreeList tests opening the DB with free-list
+// write-out after no free list sync will recover the free list
+// and write it out.
+func TestOpen_RecoverFreeListSeq(t *testing.T) {
+	db := MustOpenWithOption(&bolt.Options{NoFreelistSync: true})
+	//defer db.MustClose()
+	generateFreepages(t, db)
+	fp1 := db.Stats().FreePageN + db.Stats().PendingPageN
+	//fmt.Printf("%#v\n", db.Stats())
+
+	// Record freelist count from opening with NoFreelistSync.
+	db.o.SeqFreelistLoad = true
 	db.MustReopen()
-	// One less free page for syncing the free list on open.
-	freepages--
-	if fp := db.Stats().FreePageN; fp < freepages {
-		t.Fatalf("closed with %d free pages, opened with %d", freepages, fp)
+	freepages := db.Stats().FreePageN
+	if freepages != fp1 {
+		t.Fatalf("expected freepages=%d, got: %d", fp1, freepages)
 	}
 }
 

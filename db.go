@@ -85,7 +85,8 @@ type DB struct {
 	// The alternative one is using hashmap, it is faster in almost all circumstances
 	// but it doesn't guarantee that it offers the smallest page id available. In normal case it is safe.
 	// The default type is array
-	FreelistType FreelistType
+	FreelistType    FreelistType
+	SeqFreelistLoad bool
 
 	// When true, skips the truncate call when growing the database.
 	// Setting this to true is only safe on non-ext3/ext4 systems.
@@ -195,6 +196,7 @@ func Open(path string, mode os.FileMode, options *Options) (*DB, error) {
 	db.NoFreelistSync = options.NoFreelistSync
 	db.FreelistType = options.FreelistType
 	db.Mlock = options.Mlock
+	db.SeqFreelistLoad = options.SeqFreelistLoad
 
 	// Set default values for later DB operations.
 	db.MaxBatchSize = DefaultMaxBatchSize
@@ -315,13 +317,15 @@ func Open(path string, mode os.FileMode, options *Options) (*DB, error) {
 func (db *DB) loadFreelist() {
 	db.freelistLoad.Do(func() {
 		db.freelist = newFreelist(db.FreelistType)
-		if !db.hasSyncedFreelist() {
-			// Reconstruct free list by scanning the DB.
-			db.freelist.readIDs(db.freepages())
-		} else {
-			// Read free list from freelist page.
+		switch {
+		case db.hasSyncedFreelist():
 			db.freelist.read(db.page(db.meta().freelist))
+		case db.SeqFreelistLoad:
+			db.freelist.readIDs(db.freepagesSeq())
+		default:
+			db.freelist.readIDs(db.freepages())
 		}
+
 		db.stats.FreePageN = db.freelist.free_count()
 	})
 }
@@ -1068,6 +1072,83 @@ func (db *DB) freepages() []pgid {
 	return fids
 }
 
+func (db *DB) freepagesSeq() []pgid {
+	tx, err := db.beginTx()
+	defer func() {
+		err = tx.Rollback()
+		if err != nil {
+			panic("freepages: failed to rollback tx")
+		}
+	}()
+	if err != nil {
+		panic("freepages: failed to open read only tx")
+	}
+	// Note that children may contain invalid data: we're populating it based
+	// on all pages, including ones that have actually been freed.  We don't
+	// know which pages have been freed until we've traversed all buckets from
+	// their roots and observed which pages aren't reachable from any of those.
+	children := make(map[pgid][]pgid)
+	for i := pgid(2); i < db.meta().pgid; i++ {
+		p := db.page(i)
+		if (p.flags&branchPageFlag) != 0 && p.count > 0 {
+			children[i] = make([]pgid, p.count)
+			for b := 0; b < int(p.count); b++ {
+				elem := p.branchPageElement(uint16(b))
+				children[i][b] = elem.pgid
+			}
+		}
+		i += pgid(p.overflow)
+	}
+
+	canreach := make(map[pgid]struct{})
+	forEachBucket(&tx.root, 0, func(b *Bucket, i int) {
+		forEachPage(children, b.root, 0, func(id pgid, i int) {
+			//fmt.Printf("%d ", id)
+			p := db.page(id)
+			for i := pgid(0); i <= pgid(p.overflow); i++ {
+				canreach[id+i] = struct{}{}
+			}
+		})
+	})
+	//fmt.Println()
+	var unfree []int
+	for pgid := range canreach {
+		unfree = append(unfree, int(pgid))
+	}
+	sort.Ints(unfree)
+	//fmt.Println("unfreepages", len(unfree), unfree)
+
+	var fids []pgid
+	for i := pgid(2); i < db.meta().pgid; i++ {
+		if _, ok := canreach[i]; !ok {
+			fids = append(fids, i)
+		}
+	}
+	//fmt.Println("freepages", len(fids), fids)
+	return fids
+}
+
+func forEachBucket(b *Bucket, depth int, fn func(*Bucket, int)) {
+	_ = b.ForEach(func(k, v []byte) error {
+		fn(b, depth)
+		if child := b.Bucket(k); child != nil {
+			fn(child, depth+1)
+		}
+		return nil
+	})
+}
+
+func forEachPage(children map[pgid][]pgid, pgid pgid, depth int, fn func(pgid, int)) {
+	// Execute function.
+	fn(pgid, depth)
+
+	mykids := children[pgid]
+	// Recursively loop over children.
+	for i := 0; i < len(mykids); i++ {
+		forEachPage(children, mykids[i], depth+1, fn)
+	}
+}
+
 // Options represents the options that can be set when opening a database.
 type Options struct {
 	// Timeout is the amount of time to wait to obtain a file lock.
@@ -1122,6 +1203,8 @@ type Options struct {
 	// It prevents potential page faults, however
 	// used memory can't be reclaimed. (UNIX only)
 	Mlock bool
+
+	SeqFreelistLoad bool
 }
 
 // DefaultOptions represent the options used if nil options are passed into Open().
