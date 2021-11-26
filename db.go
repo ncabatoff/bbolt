@@ -953,7 +953,7 @@ func (db *DB) Info() *Info {
 
 // page retrieves a page reference from the mmap based on the current page size.
 func (db *DB) page(id pgid) *page {
-	fmt.Fprintln(os.Stderr, id)
+	//fmt.Fprintln(os.Stderr, id)
 	pos := id * pgid(db.pageSize)
 	return (*page)(unsafe.Pointer(&db.data[pos]))
 }
@@ -1128,7 +1128,7 @@ func (db *DB) freepagesSeq() []pgid {
 		pages[i] = ps
 	}
 
-	fmt.Fprintln(os.Stderr, "done sequential loading")
+	//fmt.Fprintln(os.Stderr, "done sequential loading")
 
 	canreach := make(map[pgid]struct{})
 	forEachBucket(&tx.root, 0, func(b *Bucket, i int) {

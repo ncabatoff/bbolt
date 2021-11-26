@@ -2037,6 +2037,7 @@ type SparseCommand struct {
 	NumWritten   int
 	NumDeleted   int
 	SyncFreelist bool
+	ValueSize    int
 }
 
 // NewSparseCommand returns a SparseCommand.
@@ -2065,6 +2066,10 @@ Additional options include:
 		Specifies the number of entries to delete.
 		Defaults to 4000.
 
+	-value-size NUM
+		Specifies the entry value size.
+		Defaults to 8192.
+
 	-sync-freelist
 		Defaults to true.
 `, "\n")
@@ -2077,6 +2082,7 @@ func (cmd *SparseCommand) Run(args ...string) error {
 	fs.SetOutput(ioutil.Discard)
 	fs.IntVar(&cmd.NumWritten, "num-written", 5000, "")
 	fs.IntVar(&cmd.NumDeleted, "num-deleted", 4000, "")
+	fs.IntVar(&cmd.ValueSize, "value-size", 8192, "")
 	fs.BoolVar(&cmd.SyncFreelist, "sync-freelist", true, "")
 	if err := fs.Parse(args); err == flag.ErrHelp {
 		fmt.Fprintln(cmd.Stderr, cmd.Usage())
@@ -2104,13 +2110,14 @@ func (cmd *SparseCommand) Run(args ...string) error {
 	if err != nil {
 		return err
 	}
-	wbuf := make([]byte, 8192)
+	b, err := tx.CreateBucket([]byte("test"))
+	if err != nil {
+		return err
+	}
+
+	wbuf := make([]byte, cmd.ValueSize)
 	for i := 0; i < cmd.NumWritten; i++ {
 		s := fmt.Sprintf("%d", i)
-		b, err := tx.CreateBucket([]byte(s))
-		if err != nil {
-			return err
-		}
 		if err = b.Put([]byte(s), wbuf); err != nil {
 			return err
 		}
@@ -2123,12 +2130,13 @@ func (cmd *SparseCommand) Run(args ...string) error {
 	if tx, err = db.Begin(true); err != nil {
 		return err
 	}
+	b = tx.Bucket([]byte("test"))
+	if b == nil {
+		return err
+	}
 	for i := 0; i < cmd.NumDeleted; i++ {
 		s := fmt.Sprintf("%d", i)
-		b := tx.Bucket([]byte(s))
-		if b == nil {
-			return err
-		}
+
 		if err := b.Delete([]byte(s)); err != nil {
 			return err
 		}
