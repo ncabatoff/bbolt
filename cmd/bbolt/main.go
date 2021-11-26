@@ -128,6 +128,8 @@ func (m *Main) Run(args ...string) error {
 		return newPagesCommand(m).Run(args[1:]...)
 	case "stats":
 		return newStatsCommand(m).Run(args[1:]...)
+	case "sparse":
+		return newSparseCommand(m).Run(args[1:]...)
 	default:
 		return ErrUnknownCommand
 	}
@@ -2025,4 +2027,118 @@ Additional options include:
 		Specifies the maximum size of individual transactions.
 		Defaults to 64KB.
 `, "\n")
+}
+
+// SparseCommand represents the "sparse" command execution.
+type SparseCommand struct {
+	Stdin        io.Reader
+	Stdout       io.Writer
+	Stderr       io.Writer
+	NumWritten   int
+	NumDeleted   int
+	SyncFreelist bool
+}
+
+// NewSparseCommand returns a SparseCommand.
+func newSparseCommand(m *Main) *SparseCommand {
+	return &SparseCommand{
+		Stdin:  m.Stdin,
+		Stdout: m.Stdout,
+		Stderr: m.Stderr,
+	}
+}
+
+func (cmd *SparseCommand) Usage() string {
+	return strings.TrimLeft(`
+usage: bolt sparse [options] DST
+
+Sparse opens a database at DST path and writes a bunch of keys into it, then
+deletes most of them.
+
+Additional options include:
+
+	-num-written NUM
+		Specifies the number of entries to write.
+		Defaults to 5000.
+
+	-num-deleted NUM
+		Specifies the number of entries to delete.
+		Defaults to 4000.
+
+	-sync-freelist
+		Defaults to true.
+`, "\n")
+}
+
+// Run executes the command.
+func (cmd *SparseCommand) Run(args ...string) error {
+	// Parse flags.
+	fs := flag.NewFlagSet("", flag.ContinueOnError)
+	fs.SetOutput(ioutil.Discard)
+	fs.IntVar(&cmd.NumWritten, "num-written", 5000, "")
+	fs.IntVar(&cmd.NumDeleted, "num-deleted", 4000, "")
+	fs.BoolVar(&cmd.SyncFreelist, "sync-freelist", true, "")
+	if err := fs.Parse(args); err == flag.ErrHelp {
+		fmt.Fprintln(cmd.Stderr, cmd.Usage())
+		return ErrUsage
+	} else if err != nil {
+		return err
+	}
+
+	// Require database path.
+	path := fs.Arg(0)
+	if path == "" {
+		return ErrPathRequired
+	}
+
+	// Open database.
+	db, err := bolt.Open(path, 0666, &bolt.Options{
+		NoFreelistSync: !cmd.SyncFreelist,
+	})
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	tx, err := db.Begin(true)
+	if err != nil {
+		return err
+	}
+	wbuf := make([]byte, 8192)
+	for i := 0; i < cmd.NumWritten; i++ {
+		s := fmt.Sprintf("%d", i)
+		b, err := tx.CreateBucket([]byte(s))
+		if err != nil {
+			return err
+		}
+		if err = b.Put([]byte(s), wbuf); err != nil {
+			return err
+		}
+	}
+	if err = tx.Commit(); err != nil {
+		return err
+	}
+
+	// Generate free pages.
+	if tx, err = db.Begin(true); err != nil {
+		return err
+	}
+	for i := 0; i < cmd.NumDeleted; i++ {
+		s := fmt.Sprintf("%d", i)
+		b := tx.Bucket([]byte(s))
+		if b == nil {
+			return err
+		}
+		if err := b.Delete([]byte(s)); err != nil {
+			return err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	if err := db.Close(); err != nil {
+		return err
+	}
+
+	return nil
 }

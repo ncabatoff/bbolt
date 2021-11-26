@@ -198,6 +198,13 @@ func Open(path string, mode os.FileMode, options *Options) (*DB, error) {
 	db.Mlock = options.Mlock
 	db.SeqFreelistLoad = options.SeqFreelistLoad
 
+	if v := os.Getenv("BOLT_NO_FREELIST_SYNC"); v != "" {
+		db.NoFreelistSync = true
+	}
+	if v := os.Getenv("BOLT_SEQ_FREELIST_LOAD"); v != "" {
+		db.SeqFreelistLoad = true
+	}
+
 	// Set default values for later DB operations.
 	db.MaxBatchSize = DefaultMaxBatchSize
 	db.MaxBatchDelay = DefaultMaxBatchDelay
@@ -292,7 +299,10 @@ func Open(path string, mode os.FileMode, options *Options) (*DB, error) {
 		return db, nil
 	}
 
-	db.loadFreelist()
+	if err := db.loadFreelist(); err != nil {
+		_ = db.close()
+		return nil, err
+	}
 
 	// Flush freelist when transitioning from no sync to sync so
 	// NoFreelistSync unaware boltdb can open the db later.
@@ -314,20 +324,30 @@ func Open(path string, mode os.FileMode, options *Options) (*DB, error) {
 // loadFreelist reads the freelist if it is synced, or reconstructs it
 // by scanning the DB if it is not synced. It assumes there are no
 // concurrent accesses being made to the freelist.
-func (db *DB) loadFreelist() {
+func (db *DB) loadFreelist() error {
+	var err error
 	db.freelistLoad.Do(func() {
 		db.freelist = newFreelist(db.FreelistType)
 		switch {
 		case db.hasSyncedFreelist():
 			db.freelist.read(db.page(db.meta().freelist))
 		case db.SeqFreelistLoad:
+			err = mmapSequential(db.dataref)
+			if err != nil {
+				return
+			}
 			db.freelist.readIDs(db.freepagesSeq())
+			err = mmapRandom(db.dataref)
+			if err != nil {
+				return
+			}
 		default:
 			db.freelist.readIDs(db.freepages())
 		}
 
 		db.stats.FreePageN = db.freelist.free_count()
 	})
+	return err
 }
 
 func (db *DB) hasSyncedFreelist() bool {

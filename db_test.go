@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -532,7 +533,7 @@ func TestOpen_BigPage(t *testing.T) {
 	}
 }
 
-func generateFreepages(t *testing.T, db *DB) {
+func generateFreepages(t *testing.T, db *DB, create, delete, size int) {
 	t.Helper()
 
 	// Write some pages.
@@ -540,8 +541,24 @@ func generateFreepages(t *testing.T, db *DB) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wbuf := make([]byte, 8192)
-	for i := 0; i < 20; i++ {
+
+	envOrParam := func(name string, def int) int {
+		raw := os.Getenv(name)
+		if raw != "" {
+			v, err := strconv.Atoi(raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return v
+		}
+		return def
+	}
+	create = envOrParam("TESTBBOLT_CREATE", create)
+	delete = envOrParam("TESTBBOLT_DELETE", delete)
+	size = envOrParam("TESTBBOLT_SIZE", size)
+
+	wbuf := make([]byte, size)
+	for i := 0; i < create; i++ {
 		s := fmt.Sprintf("%d", i)
 		b, err := tx.CreateBucket([]byte(s))
 		if err != nil {
@@ -559,7 +576,7 @@ func generateFreepages(t *testing.T, db *DB) {
 	if tx, err = db.Begin(true); err != nil {
 		t.Fatal(err)
 	}
-	for i := 0; i < 10; i++ {
+	for i := 0; i < delete; i++ {
 		s := fmt.Sprintf("%d", i)
 		b := tx.Bucket([]byte(s))
 		if b == nil {
@@ -577,14 +594,29 @@ func generateFreepages(t *testing.T, db *DB) {
 	}
 }
 
+func dropCaches(t *testing.T) {
+	f, err := os.OpenFile("/proc/sys/vm/drop_caches", os.O_WRONLY, 0600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	_, err = f.WriteString("1")
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestOpen_RecoverFreeListOrig(t *testing.T) {
 	db := MustOpenWithOption(&bolt.Options{NoFreelistSync: true})
-	//defer db.MustClose()
-	generateFreepages(t, db)
+	defer db.MustClose()
+	generateFreepages(t, db, 20, 10, 8192)
 	fp1 := db.Stats().FreePageN + db.Stats().PendingPageN
 	//fmt.Printf("%#v\n", db.Stats())
 
+	dropCaches(t)
+
 	// Record freelist count from opening with NoFreelistSync.
+	//db.o.MmapFlags |= syscall.MAP_POPULATE
 	db.MustReopen()
 	freepages := db.Stats().FreePageN
 	if freepages != fp1 {
@@ -597,10 +629,12 @@ func TestOpen_RecoverFreeListOrig(t *testing.T) {
 // and write it out.
 func TestOpen_RecoverFreeListSeq(t *testing.T) {
 	db := MustOpenWithOption(&bolt.Options{NoFreelistSync: true})
-	//defer db.MustClose()
-	generateFreepages(t, db)
+	defer db.MustClose()
+	generateFreepages(t, db, 20, 10, 8192)
 	fp1 := db.Stats().FreePageN + db.Stats().PendingPageN
 	//fmt.Printf("%#v\n", db.Stats())
+
+	dropCaches(t)
 
 	// Record freelist count from opening with NoFreelistSync.
 	db.o.SeqFreelistLoad = true
