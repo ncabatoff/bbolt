@@ -2106,44 +2106,58 @@ func (cmd *SparseCommand) Run(args ...string) error {
 	}
 	defer db.Close()
 
-	tx, err := db.Begin(true)
-	if err != nil {
-		return err
-	}
-	b, err := tx.CreateBucket([]byte("test"))
-	if err != nil {
-		return err
-	}
-
+	txNumKeys := 100000 / cmd.ValueSize
 	wbuf := make([]byte, cmd.ValueSize)
-	for i := 0; i < cmd.NumWritten; i++ {
-		s := fmt.Sprintf("%d", i)
-		if err = b.Put([]byte(s), wbuf); err != nil {
+
+	i := 0
+	for t := 0; i < cmd.NumWritten; t++ {
+		err = db.Update(func(tx *bolt.Tx) error {
+			b, err := tx.CreateBucket([]byte(fmt.Sprintf("bucket%d", t)))
+			if err != nil {
+				return err
+			}
+			n := txNumKeys
+			if i+n > cmd.NumWritten {
+				n = cmd.NumWritten - i
+			}
+			for j := 0; j < n; j++ {
+				s := fmt.Sprintf("%d", i)
+				if err = b.Put([]byte(s), wbuf); err != nil {
+					return err
+				}
+				i++
+			}
+			return nil
+		})
+		if err != nil {
 			return err
 		}
 	}
-	if err = tx.Commit(); err != nil {
-		return err
-	}
 
-	// Generate free pages.
-	if tx, err = db.Begin(true); err != nil {
-		return err
-	}
-	b = tx.Bucket([]byte("test"))
-	if b == nil {
-		return err
-	}
-	for i := 0; i < cmd.NumDeleted; i++ {
-		s := fmt.Sprintf("%d", i)
-
-		if err := b.Delete([]byte(s)); err != nil {
+	for t := 0; i < cmd.NumDeleted; t++ {
+		err = db.Update(func(tx *bolt.Tx) error {
+			b := tx.Bucket([]byte(fmt.Sprintf("bucket%d", t)))
+			if b == nil {
+				return fmt.Errorf("no bucket %d", t)
+			}
+			n := txNumKeys
+			if i+n > cmd.NumDeleted {
+				n = cmd.NumDeleted - i
+			}
+			for j := 0; j < n; j++ {
+				s := fmt.Sprintf("%d", i)
+				if err = b.Put([]byte(s), wbuf); err != nil {
+					return err
+				}
+				i++
+			}
+			return nil
+		})
+		if err != nil {
 			return err
 		}
 	}
-	if err := tx.Commit(); err != nil {
-		return err
-	}
+
 	if err := db.Close(); err != nil {
 		return err
 	}
