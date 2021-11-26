@@ -953,6 +953,7 @@ func (db *DB) Info() *Info {
 
 // page retrieves a page reference from the mmap based on the current page size.
 func (db *DB) page(id pgid) *page {
+	fmt.Fprintln(os.Stderr, id)
 	pos := id * pgid(db.pageSize)
 	return (*page)(unsafe.Pointer(&db.data[pos]))
 }
@@ -1092,6 +1093,11 @@ func (db *DB) freepages() []pgid {
 	return fids
 }
 
+type pagesum struct {
+	children []pgid
+	overflow int
+}
+
 func (db *DB) freepagesSeq() []pgid {
 	tx, err := db.beginTx()
 	defer func() {
@@ -1107,25 +1113,28 @@ func (db *DB) freepagesSeq() []pgid {
 	// on all pages, including ones that have actually been freed.  We don't
 	// know which pages have been freed until we've traversed all buckets from
 	// their roots and observed which pages aren't reachable from any of those.
-	children := make(map[pgid][]pgid)
+	pages := make(map[pgid]pagesum)
 	for i := pgid(2); i < db.meta().pgid; i++ {
 		p := db.page(i)
+		ps := pagesum{overflow: int(p.overflow)}
 		if (p.flags&branchPageFlag) != 0 && p.count > 0 {
-			children[i] = make([]pgid, p.count)
+			ps.children = make([]pgid, p.count)
 			for b := 0; b < int(p.count); b++ {
 				elem := p.branchPageElement(uint16(b))
-				children[i][b] = elem.pgid
+				ps.children[b] = elem.pgid
 			}
 		}
 		i += pgid(p.overflow)
+		pages[i] = ps
 	}
+
+	fmt.Fprintln(os.Stderr, "done sequential loading")
 
 	canreach := make(map[pgid]struct{})
 	forEachBucket(&tx.root, 0, func(b *Bucket, i int) {
-		forEachPage(children, b.root, 0, func(id pgid, i int) {
+		forEachPage(pages, b.root, 0, func(id pgid, i int) {
 			//fmt.Printf("%d ", id)
-			p := db.page(id)
-			for i := pgid(0); i <= pgid(p.overflow); i++ {
+			for i := pgid(0); i <= pgid(pages[id].overflow); i++ {
 				canreach[id+i] = struct{}{}
 			}
 		})
@@ -1158,14 +1167,14 @@ func forEachBucket(b *Bucket, depth int, fn func(*Bucket, int)) {
 	})
 }
 
-func forEachPage(children map[pgid][]pgid, pgid pgid, depth int, fn func(pgid, int)) {
+func forEachPage(pages map[pgid]pagesum, pgid pgid, depth int, fn func(pgid, int)) {
 	// Execute function.
 	fn(pgid, depth)
 
-	mykids := children[pgid]
+	mykids := pages[pgid].children
 	// Recursively loop over children.
 	for i := 0; i < len(mykids); i++ {
-		forEachPage(children, mykids[i], depth+1, fn)
+		forEachPage(pages, mykids[i], depth+1, fn)
 	}
 }
 
